@@ -9,6 +9,7 @@
 #include "f_op/f_op_actor_mng.h"
 #include "f_op/f_op_actor_iter.h"
 #include "m_Do/m_Do_ext.h"
+#include "m_Do/m_Do_graphic.h"
 #include "m_Do/m_Do_dvd_thread.h"
 #include "JSystem/JKernel/JKRHeap.h"
 #include "JSystem/JKernel/JKRExpHeap.h"
@@ -422,6 +423,9 @@ bool doLoad() {
  hostPinAdopt();
  JKRHeap::setCurrentHeap(const_cast<JKRHeap*>(static_cast<const JKRHeap*>(slot.currentHeap)));
  GXInvalidateTexAll();
+ mDoGph_gInf_c::offFade();
+ mDoGph_gInf_c::setFadeRate(0.0f);
+ if (auto* fader = mDoGph_gInf_c::getFader()) fader->setStatus(JUTFader::Wait, 0);
  const OSTime now = OSGetTime();
  if (dLib_time_c::m_timeStopped) dLib_time_c::m_stopTime = now;
  else dLib_time_c::m_diffTime += now - slot.osAtSave;
