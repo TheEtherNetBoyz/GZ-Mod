@@ -1,5 +1,4 @@
 // Geometry and layout adapted directly from TPGZ 1.2.0-dev input_viewer.cpp (GPL-3.0).
-// Native pad snapshots use the fixed original GZ HUD coordinate layout.
 #include "gz_font.hpp"
 #include "helpers/gx_helper.h"
 #include "m_Do/m_Do_controller_pad.h"
@@ -81,61 +80,35 @@ void drawEllipseOutline(uint32_t color, Vec2 center, Vec2 dim, uint8_t line_widt
     Draw::end();
 }
 
-/* void drawStick(uint32_t color, Vec2 pos, float size) {
-    float s2 = size / 2;
-    float dx1 = 0;
-    float dy1 = -1.0f;
-    float dx2 = 0.7071f;
-    float dy2 = -0.7071f;
-    float tmp;
-    Draw::begin(8, GX_TRIANGLEFAN);
-    for (uint8_t i = 0; i < 4; ++i) {
-        Draw::add_vertex(color, {pos.x + s2 * dx1, pos.y + s2 * dy1}, {0.5f + dx1, 0.5f + dy1});
-        Draw::add_vertex(color, {pos.x + s2 * dx2, pos.y + s2 * dy2}, {0.5f + dx2, 0.5f + dy2});
-        tmp = dx1;
-        dx1 = -dy1;
-        dy1 = tmp;
-        tmp = dx2;
-        dx2 = -dy2;
-        dy2 = tmp;
-    }
-    Draw::end();
-} */
-
 void drawStickOutline(uint32_t color, Vec2 pos, float size, float x_ratio) {
-    float s2 = size / 2;
-    float dx1 = 0;
-    float dy1 = -1.0f;
-    float dx2 = 0.7071f;
-    float dy2 = -0.7071f;
-    float tmp;
-    Draw::begin_outline(9, OUTLINE_WIDTH);
-    for (uint8_t i = 0; i < 4; ++i) {
-        Draw::add_vertex(color, {pos.x + s2 * dx1 * x_ratio, pos.y + s2 * dy1},
-                         {(0.5f + dx1) * x_ratio, 0.5f + dy1});
-        Draw::add_vertex(color, {pos.x + s2 * dx2 * x_ratio, pos.y + s2 * dy2},
-                         {(0.5f + dx2) * x_ratio, 0.5f + dy2});
-        tmp = dx1;
-        dx1 = -dy1;
-        dy1 = tmp;
-        tmp = dx2;
-        dx2 = -dy2;
-        dy2 = tmp;
+    constexpr float diagonal = 0.7071f;
+    constexpr std::array<std::array<float, 2>, 8> gate = {{
+        {0, -1}, {diagonal, -diagonal}, {1, 0}, {diagonal, diagonal},
+        {0, 1}, {-diagonal, diagonal}, {-1, 0}, {-diagonal, -diagonal},
+    }};
+    auto points = gate;
+    const float radius = size / 2;
+    for (auto& [x, y] : points) {
+        x = pos.x + radius * x * x_ratio;
+        y = pos.y + radius * y;
     }
-    Draw::add_vertex(color, {pos.x + s2 * dx1 * x_ratio, pos.y + s2 * dy1},
-                     {(0.5f + dx1) * x_ratio, 0.5f + dy1});
-    Draw::end();
+    drawGzClosedOutline(points, color, OUTLINE_WIDTH);
 }
 
-void drawButton(GZPad button, char c, uint32_t color, Vec2 pos, Vec2 dim, float char_size) {
+uint32_t drawButtonBody(GZPad button, uint32_t color, Vec2 pos, Vec2 dim) {
     bool is_button_down = GZ_getButtonPressed(button);
     Draw::drawRectOutline(color, {pos.x, pos.y}, dim, OUTLINE_WIDTH);
     if (is_button_down) {
         Draw::drawRect(color, {pos.x, pos.y}, dim);
     }
+    return is_button_down ? 0x00000060 : color;
+}
+
+void drawButton(GZPad button, char c, uint32_t color, Vec2 pos, Vec2 dim, float char_size) {
+    const uint32_t labelColor = drawButtonBody(button, color, pos, dim);
     float width = Font::getCharWidth(c, char_size);
     Font::GZ_drawChar(c, pos.x + (dim.x - width) / 2, pos.y + (dim.y + char_size / 2) / 2,
-                      is_button_down ? 0x00000060 : color, false, char_size);
+                      labelColor, false, char_size);
 }
 
 void drawButtonEllipse(GZPad button, char c, uint32_t color, Vec2 pos, Vec2 dim, float char_size) {
@@ -152,16 +125,25 @@ void drawButtonEllipse(GZPad button, char c, uint32_t color, Vec2 pos, Vec2 dim,
 void drawCross(uint32_t color, Vec2 pos, float size, float x_ratio) {
     float branch_width = 3.f * size / 11.f;
     float branch_length = 4.f * size / 11.f;
-    drawButton(GZPad::DPAD_LEFT, '-', color, {pos.x, pos.y + branch_length},
-               {branch_length * x_ratio, branch_width}, 8 * size / 25);
-    drawButton(GZPad::DPAD_UP, '|', color, {pos.x + branch_length * x_ratio, pos.y},
-               {branch_width * x_ratio, branch_length}, 4 * size / 25);
-    drawButton(GZPad::DPAD_RIGHT, '-', color,
-               {pos.x + (branch_length + branch_width) * x_ratio, pos.y + branch_length},
-               {branch_length * x_ratio, branch_width}, 8 * size / 25);
-    drawButton(GZPad::DPAD_DOWN, '|', color,
-               {pos.x + branch_length * x_ratio, pos.y + branch_length + branch_width},
-               {branch_width * x_ratio, branch_length}, 4 * size / 25);
+    const float markerLength = 3.5f * size / 25.f;
+    const float markerWidth = .5f * size / 25.f;
+    const Vec2 horizontal = {branch_length * x_ratio, branch_width};
+    const Vec2 vertical = {branch_width * x_ratio, branch_length};
+    const auto drawDirection = [&](GZPad button, Vec2 position, Vec2 dimensions, Vec2 marker) {
+        const uint32_t markerColor = drawButtonBody(button, color, position, dimensions);
+        drawGzPixelAlignedRect(position.x + dimensions.x / 2, position.y + dimensions.y / 2,
+                               marker.x, marker.y, markerColor);
+    };
+    drawDirection(GZPad::DPAD_LEFT, {pos.x, pos.y + branch_length},
+                  horizontal, {markerLength, markerWidth});
+    drawDirection(GZPad::DPAD_UP, {pos.x + branch_length * x_ratio, pos.y},
+                  vertical, {markerWidth, markerLength});
+    drawDirection(GZPad::DPAD_RIGHT,
+                  {pos.x + (branch_length + branch_width) * x_ratio, pos.y + branch_length},
+                  horizontal, {markerLength, markerWidth});
+    drawDirection(GZPad::DPAD_DOWN,
+                  {pos.x + branch_length * x_ratio, pos.y + branch_length + branch_width},
+                  vertical, {markerWidth, markerLength});
 }
 
 static void drawViewer(Vec2 pos, float scale, bool is_shadow, bool wide_screen) {
@@ -188,21 +170,17 @@ static void drawViewer(Vec2 pos, float scale, bool is_shadow, bool wide_screen) 
     drawCross(is_shadow ? 0x00000060 : 0xFFFFFFFF, {pos.x + 95.f * scale, pos.y + 10.f * scale},
               25.f * scale, x_ratio);
 
-    // analog sticks
     drawStickOutline(is_shadow ? 0x00000060 : 0xFFFFFFFF,
                      {pos.x + 17.5f * scale, pos.y + 30.f * scale}, 35.0f * scale, x_ratio);
     drawStickOutline(is_shadow ? 0x00000060 : 0xFFD138FF,
                      {pos.x + 62.5f * scale, pos.y + 30.f * scale}, 35.0f * scale, x_ratio);
-    drawEllipse(is_shadow ? 0x00000060 : 0xFFFFFFFF,
-                {pos.x + (17.5f + mPadMStick.mPosX * 10) * scale,
-                 pos.y + (30.f - mPadMStick.mPosY * 10) * scale},
-                {20.0f * scale, 20.0f * scale});
-    drawEllipse(is_shadow ? 0x00000060 : 0xFFD138FF,
-                {pos.x + (62.5f + mPadSStick.mPosX * 10) * scale,
-                 pos.y + (30.f - mPadSStick.mPosY * 10) * scale},
-                {20.0f * scale, 20.0f * scale});
+    drawGzCircle(pos.x + (17.5f + mPadMStick.mPosX * 10) * scale,
+                 pos.y + (30.f - mPadMStick.mPosY * 10) * scale,
+                 10.f * scale, is_shadow ? 0x00000060 : 0xFFFFFFFF);
+    drawGzCircle(pos.x + (62.5f + mPadSStick.mPosX * 10) * scale,
+                 pos.y + (30.f - mPadSStick.mPosY * 10) * scale,
+                 10.f * scale, is_shadow ? 0x00000060 : 0xFFD138FF);
 
-    // Analog triggers
     Draw::drawRectOutline(is_shadow ? 0x00000060 : 0xFFFFFFFF, {pos.x, pos.y},
                           {35.f * scale, 7.f * scale}, OUTLINE_WIDTH);
     Draw::drawRect(is_shadow ? 0x00000060 : GZ_getButtonPressed(GZPad::L) ? 0x00FF00FF : 0xFFFFFFFF,
@@ -213,11 +191,10 @@ static void drawViewer(Vec2 pos, float scale, bool is_shadow, bool wide_screen) 
                    {pos.x + (45.f + 35.f * (1 - mPadButton.mAnalogRf)) * scale, pos.y},
                    {35.f * mPadButton.mAnalogRf * scale, 7.f * scale});
 
-    // stick inputs
-    char control_x[5];  // control stick x
-    char control_y[5];  // control stick y
-    char c_x[5];        // c stick x
-    char c_y[5];        // c stick y
+    char control_x[5];
+    char control_y[5];
+    char c_x[5];
+    char c_y[5];
 
     sprintf(control_x, "%3d", mPadStatus.stick_x);
     sprintf(control_y, "%3d", mPadStatus.stick_y);
