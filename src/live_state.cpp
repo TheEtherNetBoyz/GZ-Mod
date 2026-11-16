@@ -196,9 +196,15 @@ using LockFn = void (*)(void*);
 LockFn lockEnter = nullptr, lockLeave = nullptr;
 
 struct AudioLock {
+#ifdef __APPLE__
  alignas(16) unsigned char storage[128] = {};
  AudioLock() { if (lockEnter && lockLeave) lockEnter(storage); }
  ~AudioLock() { if (lockEnter && lockLeave) lockLeave(storage); }
+#else
+ char storage = 0;
+ AudioLock() { if (lockEnter && lockLeave) lockEnter(this); }
+ ~AudioLock() { if (lockEnter && lockLeave) lockLeave(this); }
+#endif
 };
 
 void resolveAudioLock() {
