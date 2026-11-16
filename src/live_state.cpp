@@ -43,7 +43,7 @@ void hostPinRelease();
 namespace {
 enum class Request { None, Save, Load };
 
-struct StaticRange { uint32_t rva, size; };
+struct StaticRange { const char* anchor; int32_t offset; uint32_t size; const char* check; int32_t checkDelta; };
 #include "static_ranges.inc"
 
 struct Block {
@@ -87,15 +87,6 @@ size_t exeImageSize() {
  auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
  return nt->OptionalHeader.SizeOfImage;
 }
-const char* checkExeIdentity() {
- auto* base = exeBase();
- auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
- if (!base || dos->e_magic != IMAGE_DOS_SIGNATURE) return "cannot read exe header";
- auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
- if (nt->FileHeader.TimeDateStamp != kStaticsExeTimestamp || nt->OptionalHeader.SizeOfImage != kStaticsExeImageSize)
-  return "statics table is for a different Dusklight build (regenerate with gen-static-ranges.py)";
- return nullptr;
-}
 void writeLog(const char* text) {
  if (logFile == INVALID_HANDLE_VALUE) return;
  DWORD n = 0; WriteFile(logFile, text, DWORD(std::strlen(text)), &n, nullptr);
@@ -124,7 +115,6 @@ LONG CALLBACK onException(PEXCEPTION_POINTERS info) {
 }
 #else
 uint8_t* exeBase() { return nullptr; }
-const char* checkExeIdentity() { return "live state is Windows-only"; }
 void writeLog(const char*) {}
 #endif
 
@@ -154,6 +144,42 @@ void resolveAudioLock() {
  };
  find(enter, lockEnter); find(leave, lockLeave);
  if (!lockEnter || !lockLeave) { lockEnter = lockLeave = nullptr; notify("[live-state] audio lock not found; copies are not synchronised with the audio thread"); }
+}
+
+
+struct ResolvedRange { uint8_t* ptr; uint32_t size; };
+std::vector<ResolvedRange> resolvedStatics;
+bool staticsResolved = false;
+const char* staticsFailure = nullptr;
+
+// Looks each range up by symbol name on the running build and checks the distance between its two anchors.
+const char* resolveStatics() {
+#ifdef _WIN32
+ if (staticsResolved) return staticsFailure;
+ staticsResolved = true;
+ const uint8_t* lo = exeBase();
+ const uint8_t* hi = lo + exeImageSize();
+ size_t total = 0, skipped = 0, mismatched = 0;
+ for (auto& r : kStaticRanges) {
+  total += r.size;
+  void* a = nullptr; HookSymbolFlags flags{};
+  if (svc_hook->resolve(mod_ctx, r.anchor, &a, &flags) != MOD_OK || !a) { skipped += r.size; continue; }
+  if (r.check) {
+   void* b = nullptr;
+   if (svc_hook->resolve(mod_ctx, r.check, &b, &flags) != MOD_OK || !b ||
+       int64_t(reinterpret_cast<uintptr_t>(b)) - int64_t(reinterpret_cast<uintptr_t>(a)) != r.checkDelta) { skipped += r.size; ++mismatched; continue; }
+  }
+  auto* start = static_cast<uint8_t*>(a) + r.offset;
+  if (start < lo || start + r.size > hi) { skipped += r.size; continue; }
+  resolvedStatics.push_back({start, r.size});
+ }
+ say("[live-state] statics: %zu of %zu ranges resolved, %zu bytes skipped (%zu with a changed layout)",
+     resolvedStatics.size(), sizeof(kStaticRanges) / sizeof(kStaticRanges[0]), skipped, mismatched);
+ if (skipped * 10 > total) staticsFailure = "too many game statics could not be found on this Dusklight build";
+ return staticsFailure;
+#else
+ return "live state is Windows-only";
+#endif
 }
 
 constexpr size_t kHeapObjectSize = ALIGN_NEXT(sizeof(JKRExpHeap), 0x10);
@@ -279,7 +305,7 @@ void collectHostRefs(const uint8_t*, size_t, std::unordered_set<uint64_t>&, cons
 void reportHostRefs(const Snapshot&) {}
 #endif
 
-size_t staticsTotal() { size_t n = 0; for (auto& r : kStaticRanges) n += r.size; return n; }
+size_t staticsTotal() { size_t n = 0; for (auto& r : resolvedStatics) n += r.size; return n; }
 
 const char* refuse() {
  if (!playable()) return "not in stable gameplay";
@@ -290,7 +316,7 @@ const char* refuse() {
 }
 
 const char* capture(Snapshot& s) {
- if (auto* why = checkExeIdentity()) return why;
+ if (auto* why = resolveStatics()) return why;
  const char* why = nullptr;
  if (!collectHeaps(s.heaps, &why) || !collectActors(s.heaps, s.actors, &why)) return why;
  for (auto& h : s.heaps) {
@@ -310,7 +336,7 @@ const char* capture(Snapshot& s) {
  {
   AudioLock audioLock;
   uint8_t* cursor = s.statics.get();
-  for (auto& r : kStaticRanges) { std::memcpy(cursor, exeBase() + r.rva, r.size); cursor += r.size; }
+  for (auto& r : resolvedStatics) { std::memcpy(cursor, r.ptr, r.size); cursor += r.size; }
   for (auto& h : s.heaps) std::memcpy(h.data.get(), h.ptr, h.size);
   for (auto& a : s.actors) std::memcpy(a.data.get(), a.ptr, a.size);
  }
@@ -325,7 +351,7 @@ const char* capture(Snapshot& s) {
 const char* validate() {
  if (!slot.valid) return "no state saved";
  if (auto* why = refuse()) return why;
- if (auto* why = checkExeIdentity()) return why;
+ if (auto* why = resolveStatics()) return why;
  std::vector<HeapCopy> heaps; const char* why = nullptr;
  if (!collectHeaps(heaps, &why)) return why;
  for (size_t i = 0; i < heaps.size(); ++i)
@@ -373,7 +399,7 @@ bool doLoad() {
  {
   AudioLock audioLock;
   const uint8_t* cursor = slot.statics.get();
-  for (auto& r : kStaticRanges) { std::memcpy(exeBase() + r.rva, cursor, r.size); cursor += r.size; }
+  for (auto& r : resolvedStatics) { std::memcpy(r.ptr, cursor, r.size); cursor += r.size; }
   for (auto& h : slot.heaps) std::memcpy(h.ptr, h.data.get(), h.size);
   for (auto& a : slot.actors) std::memcpy(a.ptr, a.data.get(), a.size);
  }
