@@ -60,6 +60,9 @@ else()
     # In-tree builds use the host SDK, ABI targets and bundled-mod installer.
     set(DUSK_DIR "${CMAKE_SOURCE_DIR}")
 endif()
+if(MSVC)
+ add_compile_options(/Zc:__cplusplus)
+endif()
 add_mod(dusklight_gz FEATURES game webgpu
     SOURCES src/speedrun_guard.cpp src/interpolation.cpp src/projection.cpp src/tunic.cpp src/link_movement.cpp src/transform_indicator.cpp src/combo_menu.cpp src/flag_log.cpp src/flag_records.cpp src/triggers.cpp src/collision.cpp src/mod.cpp src/actor_tools.cpp src/scene.cpp src/core.cpp src/ui.cpp src/cheats.cpp src/input.cpp
             src/enemy_damage.cpp src/item_lifetime.cpp src/clawshot.cpp src/inventory.cpp src/item_wheel.cpp src/reload.cpp src/collectibles.cpp src/flags.cpp src/rng.cpp src/camera.cpp src/warping.cpp src/practice.cpp src/gz_font.cpp src/foreground.cpp src/gz_menu.cpp src/overlays.cpp src/input_viewer.cpp src/presentation.cpp src/link_debug.cpp src/loading.cpp src/link_tools.cpp src/mirror_mode.cpp src/checkers.cpp src/live_state.cpp src/host_pin.cpp
