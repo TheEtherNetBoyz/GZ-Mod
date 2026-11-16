@@ -341,6 +341,7 @@ const char* refuse() {
  if (!playable()) return "not in gameplay";
  if (sceneLoading() || practiceLoadPending()) return "loading";
  if (!daAlink_getAlinkActorClass()) return "no player";
+ if (fopAcM_SearchByName(fpcNm_TITLE_e)) return "title screen";
  if (mDoDvdThd::l_param.getFirstCommand()) return "loading";
 
  auto& res = g_dComIfG_gameInfo.mResControl;
