@@ -78,5 +78,14 @@ void endGzShape(){
  else if(primitive==GX_TRIANGLESTRIP){for(size_t i=2;i<vertices.size();i++)triangle(i-2,i-1,i);}
  else if(primitive==GX_TRIANGLES){for(size_t i=0;i+2<vertices.size();i+=3)triangle(i,i+1,i+2);}
 }
+void drawGzClosedOutline(std::span<const std::array<float,2>> points,uint32_t color,unsigned width){
+ if(drawing)foregroundClosedOutline(points,color,float(width)/6);
+}
+void drawGzPixelAlignedRect(float centerX,float centerY,float width,float height,uint32_t color){
+ if(drawing)foregroundPixelAlignedRect(centerX,centerY,width,height,color);
+}
+void drawGzCircle(float centerX,float centerY,float radius,uint32_t color){
+ if(drawing)foregroundCircle(centerX,centerY,radius,color);
+}
 void endGzDraw(){drawing=false;}
 }

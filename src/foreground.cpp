@@ -1,11 +1,14 @@
 // GZ is part of the game framebuffer, after JFWDisplay's final fade.
 #include "foreground.hpp"
+#include "outline_geometry.hpp"
 #include "presentation.hpp"
 #include "presentation_layout.hpp"
 #include "helpers/gx_helper.h"
 #include "m_Do/m_Do_graphic.h"
 #include <algorithm>
+#include <cmath>
 #include <memory>
+#include <numbers>
 #include <unordered_map>
 #include <cstring>
 #include "mods/svc/resource.h"
@@ -16,6 +19,7 @@ struct Texture {
 };
 static std::vector<std::unique_ptr<Texture>> textures;
 static uint64_t blank=0;
+static OutlinePoint pixelsPerCanvasUnit,viewportOrigin;
 static std::unordered_map<std::string,uint64_t> resources;
 ModResult initForeground(){const uint32_t white=0xffffffff;blank=foregroundTexture(1,1,&white);return MOD_OK;}
 void shutdownForeground(){AuroraGXSync();textures.clear();resources.clear();blank=0;}
@@ -51,6 +55,8 @@ bool beginForeground(){
  u32 renderWidth=0,renderHeight=0;AuroraGetRenderSize(&renderWidth,&renderHeight);
  if(!renderWidth||!renderHeight)return false;
  const auto viewport=overlayViewport(float(renderWidth),float(renderHeight));
+ pixelsPerCanvasUnit={viewport.width/viewport.canvasWidth,viewport.height/CanvasHeight};
+ viewportOrigin={viewport.left,viewport.top};
  GXSetViewportRender(viewport.left,viewport.top,viewport.width,viewport.height,0,1);
  GXSetScissorRender(0,0,renderWidth,renderHeight);
  Mtx44 projection;
@@ -88,9 +94,53 @@ void foregroundQuad(uint64_t texture,float left,float top,float right,float bott
  vertex(left,top,u0,v0,color);vertex(right,top,u1,v0,color);
  vertex(right,bottom,u1,v1,color);vertex(left,bottom,u0,v1,color);GXEnd();
 }
+void foregroundPixelAlignedRect(float centerX,float centerY,float width,float height,uint32_t color){
+ // Size both axes with the same scale so a quarter turn preserves the pixel dimensions.
+ const float w=std::max(1.f,std::round(width*pixelsPerCanvasUnit[1]));
+ const float h=std::max(1.f,std::round(height*pixelsPerCanvasUnit[1]));
+ const float x=std::round(centerX*pixelsPerCanvasUnit[0]+viewportOrigin[0]-w*.5f)-viewportOrigin[0];
+ const float y=std::round(centerY*pixelsPerCanvasUnit[1]+viewportOrigin[1]-h*.5f)-viewportOrigin[1];
+ foregroundQuad(blank,x/pixelsPerCanvasUnit[0],y/pixelsPerCanvasUnit[1],
+                (x+w)/pixelsPerCanvasUnit[0],(y+h)/pixelsPerCanvasUnit[1],0,0,0,0,color);
+}
+void foregroundCircle(float centerX,float centerY,float radius,uint32_t color){
+ static const auto unitCircle=[]{
+  std::array<OutlinePoint,MaxCircleSegments> points;
+  for(unsigned i=0;i<points.size();++i){
+   const double angle=2*std::numbers::pi*i/points.size();
+   points[i]={static_cast<float>(std::cos(angle)),static_cast<float>(std::sin(angle))};
+  }
+  return points;
+ }();
+ const float pixelRadius=radius*pixelsPerCanvasUnit[1];
+ const float radiusX=pixelRadius/pixelsPerCanvasUnit[0];
+ const auto segments=circleSegments(pixelRadius);
+ const auto step=MaxCircleSegments/segments;
+ use(blank);GXBegin(GX_TRIANGLEFAN,GX_VTXFMT0,static_cast<u16>(segments));
+ for(unsigned i=0;i<unitCircle.size();i+=step){
+  const auto& p=unitCircle[i];
+  vertex(centerX+p[0]*radiusX,centerY+p[1]*radius,0,0,color);
+ }
+ GXEnd();
+}
 void foregroundLine(float x0,float y0,float x1,float y1,uint32_t color,float width){
  use(blank);GXSetLineWidth(static_cast<u8>(std::clamp(width*6.f,1.f,255.f)),GX_TO_ZERO);
  GXBegin(GX_LINES,GX_VTXFMT0,2);vertex(x0,y0,0,0,color);vertex(x1,y1,0,0,color);GXEnd();
+}
+void foregroundClosedOutline(std::span<const OutlinePoint> points,uint32_t color,float width){
+ const float radius=outlinePixelRadius(width,pixelsPerCanvasUnit[1]);
+ const auto emit=[&](const OutlineJoin& join){
+  vertex(join[0][0],join[0][1],0,0,color);
+  vertex(join[1][0],join[1][1],0,0,color);
+ };
+ const auto first=outlineJoin(points.back(),points.front(),points[1],pixelsPerCanvasUnit,radius);
+ use(blank);GXBegin(GX_TRIANGLESTRIP,GX_VTXFMT0,static_cast<u16>(2*(points.size()+1)));
+ emit(first);
+ for(size_t i=1;i<points.size();++i)
+  emit(outlineJoin(points[i-1],points[i],i+1<points.size() ? points[i+1] : points.front(),
+                   pixelsPerCanvasUnit,radius));
+ emit(first);
+ GXEnd();
 }
 void foregroundTriangle(float x0,float y0,float x1,float y1,float x2,float y2,uint32_t color){
  use(blank);GXBegin(GX_TRIANGLES,GX_VTXFMT0,3);

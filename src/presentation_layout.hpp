@@ -2,6 +2,14 @@
 #include <algorithm>
 namespace gz {
 struct OverlayViewport{float left=0,top=0,width=0,height=0,canvasWidth=608;};
+inline constexpr unsigned MaxCircleSegments=128;
+inline unsigned circleSegments(float pixelRadius){
+ // Keep the gap between a chord and the circle below a quarter pixel.
+ if(pixelRadius<=13.f)return 16;
+ if(pixelRadius<=51.f)return 32;
+ if(pixelRadius<=207.f)return 64;
+ return MaxCircleSegments;
+}
 inline OverlayViewport overlayViewport(float width,float height){
  if(width<=0||height<=0)return {};
  if(width/height>=4.f/3)return {0,0,width,height,608.f*(width/height)/(4.f/3)};
