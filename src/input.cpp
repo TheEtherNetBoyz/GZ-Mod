@@ -118,8 +118,8 @@ ModResult initInput() {
   {"combo_store","Store position",0x28,0,storePosition,false,"teleport"},
   {"combo_load","Restore position",0x24,0,loadPosition,false,"teleport"},
 #ifdef GZ_LIVE_STATE
-  {"combo_state_save","Save live state",0x62,0,liveStateSave,false,"live_state"},
-  {"combo_state_load","Load live state",0x22,0,liveStateLoad,false,"live_state"},
+  {"combo_state_save","Save state",0x62,0,liveStateSave,false,"live_state"},
+  {"combo_state_load","Load state",0x22,0,liveStateLoad,false,"live_state"},
 #endif
   {"combo_moon","Moon jump",0x120,0,[]{if(playable())daPy_getPlayerActorClass()->speed.y=56;},true,"moon_jump"},
   {"combo_gorge","Gorge void practice",0x50,0,loadGorgePractice,false,"gorge_void"},

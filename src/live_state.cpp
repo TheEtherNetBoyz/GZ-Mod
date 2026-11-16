@@ -463,7 +463,7 @@ void initLiveState() {
  crashHandler = AddVectoredExceptionHandler(1, onException);
 #endif
  resolveAudioLock();
- toggle("live_state", "Tools", "live state hotkeys", "L + R + Right saves and R + Right loads a full in-memory state.", true);
+ toggle("live_state", "Tools", "Save States", "L + R + Right to save, R + Right to load.", true);
  if (initHostPin() != MOD_OK) notify("[live-state] texture hook unavailable; host blocks are not kept alive");
 }
 
