@@ -48,7 +48,12 @@ struct Block {
  uint8_t* ptr = nullptr; size_t size = 0;
  std::unique_ptr<uint8_t[]> data;
 };
-struct HeapCopy : Block { JKRExpHeap* heap = nullptr; bool scan = true; };
+struct Run { size_t firstPage, pages, offset; };
+struct HeapCopy : Block {
+ JKRExpHeap* heap = nullptr; bool scan = true;
+ std::vector<Run> runs;
+ std::unique_ptr<uint8_t[]> packed; size_t packedSize = 0;
+};
 struct Snapshot {
  bool valid = false;
  char stage[8] = {};
@@ -61,7 +66,7 @@ struct Snapshot {
  std::unique_ptr<uint8_t[]> statics; size_t staticsSize = 0;
  std::vector<const void*> archives;
  std::vector<std::string> archiveNames;
- struct HostRef { uintptr_t ptr; size_t size; int region; size_t offset; };
+ struct HostRef { uintptr_t ptr; size_t size; int region; size_t offset; uint64_t owner; size_t ownerDist; };
  std::vector<HostRef> hostRefs;
  const void* currentHeap = nullptr;
  cXyz position, speed;
@@ -290,29 +295,27 @@ void collectHostRefs(const uint8_t* data, size_t bytes, std::unordered_set<uint6
   }
   if (!regionOk || mbi.State != MEM_COMMIT || mbi.Type != MEM_PRIVATE || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || v < lo + 16) continue;
   size_t size = 0;
-  if (hostBlockSize(uintptr_t(v), size)) out.push_back({uintptr_t(v), size, region, i});
+  if (hostBlockSize(uintptr_t(v), size)) {
+   uint64_t owner = 0; size_t dist = 0;
+   for (size_t k = 1; k <= 256 && k * 8 <= i; ++k) {
+    uint64_t w; std::memcpy(&w, data + i - k * 8, 8);
+    if (w >= exeLo && w < exeHi) { owner = w - exeLo; dist = k * 8; break; }
+   }
+   out.push_back({uintptr_t(v), size, region, i, owner, dist});
+  }
  }
 }
 
 void reportHostRefs(const Snapshot& snap) {
  size_t bad = 0;
- const uint64_t exeLo = uint64_t(uintptr_t(exeBase())), exeHi = exeLo + exeImageSize();
  for (auto& r : snap.hostRefs) {
   size_t size = 0;
   const bool live = hostBlockSize(r.ptr, size);
   if (live && size == r.size) continue;
   ++bad;
   if (bad > 6) continue;
-  uint64_t owner = 0; size_t dist = 0;
-  if (r.region >= 0 && size_t(r.region) < snap.heaps.size()) {
-   const uint8_t* d = snap.heaps[size_t(r.region)].data.get();
-   for (size_t k = 1; k <= 256 && k * 8 <= r.offset; ++k) {
-    uint64_t v; std::memcpy(&v, d + r.offset - k * 8, 8);
-    if (v >= exeLo && v < exeHi) { owner = v - exeLo; dist = k * 8; break; }
-   }
-  }
   say("[live-state]   host block %p: saved size %zu, now %s%zu; held in region %d +0x%zx; nearest vtable rva %llx at -0x%zx",
-      (void*)r.ptr, r.size, live ? "" : "gone/", live ? size : size_t(0), r.region, r.offset, (unsigned long long)owner, dist);
+      (void*)r.ptr, r.size, live ? "" : "gone/", live ? size : size_t(0), r.region, r.offset, (unsigned long long)r.owner, r.ownerDist);
  }
  if (bad) say("[live-state] warning: %zu of %zu saved host blocks changed; loading anyway", bad, snap.hostRefs.size());
 }
@@ -329,6 +332,60 @@ const char* refuse() {
  if (!daAlink_getAlinkActorClass()) return "no player";
  if (mDoDvdThd::l_param.getFirstCommand()) return "a resource load is in flight";
  return nullptr;
+}
+
+constexpr size_t kPage = 4096;
+
+bool allZero(const uint8_t* p, size_t len) {
+ size_t i = 0;
+ for (; i + 8 <= len; i += 8) { uint64_t v; std::memcpy(&v, p + i, 8); if (v) return false; }
+ for (; i < len; ++i) if (p[i]) return false;
+ return true;
+}
+
+// Keep only the pages that are not entirely zero, grouped into runs of consecutive pages.
+bool pack(HeapCopy& h) {
+ const size_t pages = (h.size + kPage - 1) / kPage;
+ size_t stored = 0;
+ h.runs.clear();
+ for (size_t p = 0; p < pages; ++p) {
+  const size_t len = std::min(kPage, h.size - p * kPage);
+  if (allZero(h.data.get() + p * kPage, len)) continue;
+  if (!h.runs.empty() && h.runs.back().firstPage + h.runs.back().pages == p) ++h.runs.back().pages;
+  else h.runs.push_back({p, 1, stored});
+  stored += len;
+ }
+ h.packed.reset(new (std::nothrow) uint8_t[stored ? stored : 1]);
+ if (!h.packed) return false;
+ h.packedSize = stored;
+ for (auto& r : h.runs) {
+  const size_t start = r.firstPage * kPage, end = std::min(h.size, (r.firstPage + r.pages) * kPage);
+  std::memcpy(h.packed.get() + r.offset, h.data.get() + start, end - start);
+ }
+ return true;
+}
+
+// The packed form must reproduce the original exactly: every gap zero, every run identical.
+bool verifyPacked(const HeapCopy& h) {
+ size_t pos = 0;
+ for (auto& r : h.runs) {
+  const size_t start = r.firstPage * kPage, end = std::min(h.size, (r.firstPage + r.pages) * kPage);
+  if (!allZero(h.data.get() + pos, start - pos)) return false;
+  if (std::memcmp(h.data.get() + start, h.packed.get() + r.offset, end - start) != 0) return false;
+  pos = end;
+ }
+ return allZero(h.data.get() + pos, h.size - pos);
+}
+
+void restoreRegion(const HeapCopy& h) {
+ size_t pos = 0;
+ for (auto& r : h.runs) {
+  const size_t start = r.firstPage * kPage, end = std::min(h.size, (r.firstPage + r.pages) * kPage);
+  if (start > pos) std::memset(h.ptr + pos, 0, start - pos);
+  std::memcpy(h.ptr + start, h.packed.get() + r.offset, end - start);
+  pos = end;
+ }
+ if (h.size > pos) std::memset(h.ptr + pos, 0, h.size - pos);
 }
 
 const char* capture(Snapshot& s) {
@@ -360,6 +417,11 @@ const char* capture(Snapshot& s) {
   std::unordered_set<uint64_t> seen;
   collectHostRefs(s.statics.get(), s.staticsSize, seen, s.heaps, s.hostRefs, -1);
   for (size_t i = 0; i < s.heaps.size(); ++i) if (s.heaps[i].scan) collectHostRefs(s.heaps[i].data.get(), s.heaps[i].size, seen, s.heaps, s.hostRefs, int(i));
+ }
+ for (auto& h : s.heaps) {
+  if (!pack(h)) return "out of memory";
+  if (!verifyPacked(h)) return "the packed copy did not match the original";
+  h.data.reset();
  }
  return nullptr;
 }
@@ -403,7 +465,9 @@ bool doSave() {
  const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
  say("[live-state] saved stage=%s room=%d heaps=%zu actors=%zu archives=%zu statics=%zu hostBlocks=%zu held=%zu bytes in %lld us",
      slot.stage, slot.room, slot.heaps.size(), slot.actors.size(), slot.archives.size(), slot.staticsSize, slot.hostRefs.size(), hostPinHeld(), (long long)us);
- for (auto& h : slot.heaps) say("[live-state]   region %p size %zu", (void*)h.ptr, h.size);
+ size_t total = 0, stored = 0;
+ for (auto& h : slot.heaps) { total += h.size; stored += h.packedSize; }
+ say("[live-state]   kept %zu of %zu MiB (empty pages skipped)", stored >> 20, total >> 20);
  return true;
 }
 
@@ -416,7 +480,7 @@ bool doLoad() {
   AudioLock audioLock;
   const uint8_t* cursor = slot.statics.get();
   for (auto& r : resolvedStatics) { std::memcpy(r.ptr, cursor, r.size); cursor += r.size; }
-  for (auto& h : slot.heaps) std::memcpy(h.ptr, h.data.get(), h.size);
+  for (auto& h : slot.heaps) restoreRegion(h);
   for (auto& a : slot.actors) std::memcpy(a.ptr, a.data.get(), a.size);
  }
  resetArchiveCaches();
