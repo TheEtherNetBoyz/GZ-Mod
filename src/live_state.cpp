@@ -186,6 +186,21 @@ bool staticsResolved = false;
 const char* staticsFailure = nullptr;
 
 // Looks each range up by symbol name on the running build and checks the distance between its two anchors.
+// Statics that own host-allocated containers. Restoring their header without the matching backing store corrupts the C++ heap on the next insert, so they keep their live contents.
+struct HostContainerStatic { const char* name; uint32_t size; };
+const HostContainerStatic kHostContainers[] = {{"sMessageAnimations", 32}, {"sSelectionAnimations", 32}};
+
+void carveOut(uint8_t* hole, uint32_t holeSize) {
+ std::vector<ResolvedRange> out;
+ for (auto& r : resolvedStatics) {
+  uint8_t* rEnd = r.ptr + r.size; uint8_t* hEnd = hole + holeSize;
+  if (hEnd <= r.ptr || hole >= rEnd) { out.push_back(r); continue; }
+  if (hole > r.ptr) out.push_back({r.ptr, uint32_t(hole - r.ptr)});
+  if (hEnd < rEnd) out.push_back({hEnd, uint32_t(rEnd - hEnd)});
+ }
+ resolvedStatics.swap(out);
+}
+
 const char* resolveStatics() {
 #ifdef _WIN32
  if (staticsResolved) return staticsFailure;
@@ -205,6 +220,11 @@ const char* resolveStatics() {
   auto* start = static_cast<uint8_t*>(a) + r.offset;
   if (start < lo || start + r.size > hi) { skipped += r.size; continue; }
   resolvedStatics.push_back({start, r.size});
+ }
+ for (auto& h : kHostContainers) {
+  void* a = nullptr; HookSymbolFlags flags{};
+  if (svc_hook->resolve(mod_ctx, h.name, &a, &flags) != MOD_OK || !a) { say("[live-state] host container static %s was not found", h.name); continue; }
+  carveOut(static_cast<uint8_t*>(a), h.size);
  }
  say("[live-state] statics: %zu of %zu ranges resolved, %zu bytes skipped (%zu with a changed layout)",
      resolvedStatics.size(), sizeof(kStaticRanges) / sizeof(kStaticRanges[0]), skipped, mismatched);
