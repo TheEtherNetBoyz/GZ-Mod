@@ -188,7 +188,7 @@ const char* staticsFailure = nullptr;
 // Looks each range up by symbol name on the running build and checks the distance between its two anchors.
 // Statics that own host-allocated containers. Restoring their header without the matching backing store corrupts the C++ heap on the next insert, so they keep their live contents.
 struct HostContainerStatic { const char* name; uint32_t size; };
-const HostContainerStatic kHostContainers[] = {{"sMessageAnimations", 32}, {"sSelectionAnimations", 32}};
+const HostContainerStatic kHostContainers[] = {{"sMessageAnimations", 32}, {"sSelectionAnimations", 32}, {"sTimerAnimations", 32}};
 
 void carveOut(uint8_t* hole, uint32_t holeSize) {
  std::vector<ResolvedRange> out;
