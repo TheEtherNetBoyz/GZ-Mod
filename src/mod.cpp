@@ -16,7 +16,7 @@ IMPORT_SERVICE(HostService,svc_host);
 IMPORT_SERVICE(CameraService,svc_camera);
 IMPORT_SERVICE(ResourceService,svc_resource);
 IMPORT_SERVICE(GfxService,svc_gfx);
-namespace gz {ModResult initInterpolation();ModResult initProjection();ModResult initTunic();ModResult initFastMovement();ModResult initFlagLog();ModResult initTriggers();ModResult initCollision();ModResult initActorTools();ModResult installScene();ModResult initCheckers();void initOverlays();ModResult installTimerHooks();void overlayTick();ModResult initGzMenu();void shutdownGzMenu();ModResult installPractice();void shutdownInput();void initItemWheel();void initCollectibles();void initWarping();ModResult initReload();ModResult initRng();ModResult initCamera();void cameraTick();void shutdownCamera();void reloadTick();}
+namespace gz {void initLiveState();void liveStateTick();void shutdownLiveState();ModResult initInterpolation();ModResult initProjection();ModResult initTunic();ModResult initFastMovement();ModResult initFlagLog();ModResult initTriggers();ModResult initCollision();ModResult initActorTools();ModResult installScene();ModResult initCheckers();void initOverlays();ModResult installTimerHooks();void overlayTick();ModResult initGzMenu();void shutdownGzMenu();ModResult installPractice();void shutdownInput();void initItemWheel();void initCollectibles();void initWarping();ModResult initReload();ModResult initRng();ModResult initCamera();void cameraTick();void shutdownCamera();void reloadTick();}
 namespace gz {
 void initializeNativeOxygen();void resetRngForSpeedrun();void cancelPracticeForSpeedrun();void resetReloadForSpeedrun();void resetTimer();
 void suspendGz(){
@@ -66,12 +66,13 @@ MOD_EXPORT ModResult mod_initialize(ModError* error) {
  r=gz::initProjection();if(r!=MOD_OK)return reportInitFailure("initProjection",r,error);
  r=gz::initCollision();if(r!=MOD_OK)return reportInitFailure("initCollision",r,error);
  r=gz::initActorTools();if(r!=MOD_OK)return reportInitFailure("initActorTools",r,error);
+ gz::initLiveState();
  gz::initScene();r=gz::installScene();if(r!=MOD_OK)return reportInitFailure("installScene",r,error);
  gz::initOverlays();r=gz::installTimerHooks();if(r!=MOD_OK)return reportInitFailure("installTimerHooks",r,error);gz::initPractice();r=gz::installPractice();if(r!=MOD_OK)return reportInitFailure("installPractice",r,error);
  r=gz::initUi();if(r!=MOD_OK)return reportInitFailure("initUi",r,error);
  r=gz::initGzMenu();if(r!=MOD_OK)return reportInitFailure("initGzMenu",r,error);
  gz::refresh();svc_log->info(mod_ctx,"Dusklight GZ initialized");return MOD_OK;
 }
-MOD_EXPORT ModResult mod_update(ModError*) {gz::speedrunTick();if(gz::speedrunBlocked())return MOD_OK;gz::refresh();gz::initializeNativeOxygen();gz::practiceTick();gz::reloadTick();gz::overlayTick();gz::inputTick();gz::cameraTick();gz::sceneTick();gz::cheatTick();return MOD_OK;}
-MOD_EXPORT ModResult mod_shutdown(ModError*) {gz::shutdownGzMenu();gz::shutdownMoveLink();gz::shutdownCamera();gz::shutdownScene();gz::shutdownInput();gz::shutdownCheats();return MOD_OK;}
+MOD_EXPORT ModResult mod_update(ModError*) {gz::speedrunTick();if(gz::speedrunBlocked())return MOD_OK;gz::refresh();gz::initializeNativeOxygen();gz::practiceTick();gz::liveStateTick();gz::reloadTick();gz::overlayTick();gz::inputTick();gz::cameraTick();gz::sceneTick();gz::cheatTick();return MOD_OK;}
+MOD_EXPORT ModResult mod_shutdown(ModError*) {gz::shutdownLiveState();gz::shutdownGzMenu();gz::shutdownMoveLink();gz::shutdownCamera();gz::shutdownScene();gz::shutdownInput();gz::shutdownCheats();return MOD_OK;}
 }

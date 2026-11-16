@@ -72,7 +72,7 @@ static std::vector<Row> rows(){
   control("font","font:");control("drop_shadows","drop shadows");control("practice_swap_equips","swap equips");
   sub("command combos","Hotkeys");sub("menu positions","Positions");control("reset_positions");sub("credits","credits");return out;
  }else if(name=="tools"){
-  sub("checkers","Checkers");sub("controller","controller");sub("link","link");sub("scene","tools scene");sub("timers","timers");sub("rng","RNG");return out;
+  sub("checkers","Checkers");sub("controller","controller");sub("link","link");sub("scene","tools scene");sub("timers","timers");sub("rng","RNG");control("live_state");return out;
  }else if(name=="RNG"){
   control("freeze_rng","freeze rng values");control("advance_rng","randomize values");control("load_rng_preset","load preset");control("rng_preset","rng presets:");return out;
  }else if(name=="Checkers"){

@@ -1,0 +1,451 @@
+// Experimental live state: keys 2 = save, 1 = load. A refused load writes nothing.
+#include "core.hpp"
+#include "loading.hpp"
+#include "native_pose.hpp"
+#include "d/d_com_inf_game.h"
+#include "d/d_camera.h"
+#include "d/d_lib.h"
+#include "d/actor/d_a_alink.h"
+#include "f_op/f_op_actor_mng.h"
+#include "f_op/f_op_actor_iter.h"
+#include "m_Do/m_Do_ext.h"
+#include "m_Do/m_Do_dvd_thread.h"
+#include "JSystem/JKernel/JKRHeap.h"
+#include "JSystem/JKernel/JKRExpHeap.h"
+#include "JSystem/JKernel/JKRFileLoader.h"
+#include "Z2AudioLib/Z2SoundMgr.h"
+#include <dolphin/ar.h>
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <memory>
+#include <new>
+#include <string>
+#include <unordered_set>
+#include <vector>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <Windows.h>
+#endif
+#include <SDL3/SDL_events.h>
+#include <SDL3/SDL_keycode.h>
+DEFINE_HOOK_SYMBOL("dusk::ui::handle_event", void(SDL_Event&), LiveStateKeyHook);
+namespace gz {
+bool practiceLoadPending();
+ModResult initHostPin();
+void hostPinSet(const std::vector<uintptr_t>& blocks);
+void resetArchiveCaches();
+void hostPinAdopt();
+size_t hostPinHeld();
+void hostPinRelease();
+namespace {
+enum class Request { None, Save, Load };
+
+struct StaticRange { uint32_t rva, size; };
+#include "static_ranges.inc"
+
+struct Block {
+ uint8_t* ptr = nullptr; size_t size = 0;
+ std::unique_ptr<uint8_t[]> data;
+};
+struct HeapCopy : Block { JKRExpHeap* heap = nullptr; bool scan = true; };
+struct Snapshot {
+ bool valid = false;
+ char stage[8] = {};
+ int room = -1, layer = -1;
+ OSTime osAtSave = 0;
+ const void* player = nullptr;
+ uint32_t processId = 0;
+ std::vector<HeapCopy> heaps;
+ std::vector<Block> actors;
+ std::unique_ptr<uint8_t[]> statics; size_t staticsSize = 0;
+ std::vector<const void*> archives;
+ std::vector<std::string> archiveNames;
+ struct HostRef { uintptr_t ptr; size_t size; int region; size_t offset; };
+ std::vector<HostRef> hostRefs;
+ const void* currentHeap = nullptr;
+ cXyz position, speed;
+ csXyz shapeAngle;
+ s16 currentAngleY = 0;
+ float speedF = 0;
+ bool camera = false;
+ cXyz eye, center;
+};
+Snapshot slot;
+Request pending = Request::None;
+uint32_t framesSinceLoad = 0xFFFFFFFF;
+
+#ifdef _WIN32
+HANDLE logFile = INVALID_HANDLE_VALUE;
+PVOID crashHandler = nullptr;
+thread_local bool probingHostBlock = false;
+uint8_t* exeBase() { return reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr)); }
+size_t exeImageSize() {
+ auto* base = exeBase();
+ auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+ return nt->OptionalHeader.SizeOfImage;
+}
+const char* checkExeIdentity() {
+ auto* base = exeBase();
+ auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+ if (!base || dos->e_magic != IMAGE_DOS_SIGNATURE) return "cannot read exe header";
+ auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+ if (nt->FileHeader.TimeDateStamp != kStaticsExeTimestamp || nt->OptionalHeader.SizeOfImage != kStaticsExeImageSize)
+  return "statics table is for a different Dusklight build (regenerate with gen-static-ranges.py)";
+ return nullptr;
+}
+void writeLog(const char* text) {
+ if (logFile == INVALID_HANDLE_VALUE) return;
+ DWORD n = 0; WriteFile(logFile, text, DWORD(std::strlen(text)), &n, nullptr);
+}
+LONG CALLBACK onException(PEXCEPTION_POINTERS info) {
+ if (probingHostBlock || info->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+ char line[256];
+ const auto base = reinterpret_cast<uintptr_t>(exeBase());
+ std::snprintf(line, sizeof(line), "CRASH rip=%llx rva=%llx addr=%llx framesSinceLoad=%u\n",
+  (unsigned long long)info->ContextRecord->Rip, (unsigned long long)(info->ContextRecord->Rip - base),
+  (unsigned long long)info->ExceptionRecord->ExceptionInformation[1], framesSinceLoad);
+ writeLog(line);
+ const auto* sp = reinterpret_cast<const uintptr_t*>(info->ContextRecord->Rsp);
+ const size_t imageSize = exeImageSize();
+ int found = 0;
+ for (int i = 0; i < 512 && found < 24; ++i) {
+  uintptr_t v = 0;
+  if (IsBadReadPtr(sp + i, sizeof(v))) break;
+  v = sp[i];
+  if (v >= base && v < base + imageSize) {
+   std::snprintf(line, sizeof(line), "  stack+%d rva=%llx\n", i * 8, (unsigned long long)(v - base));
+   writeLog(line); ++found;
+  }
+ }
+ return EXCEPTION_CONTINUE_SEARCH;
+}
+#else
+uint8_t* exeBase() { return nullptr; }
+const char* checkExeIdentity() { return "live state is Windows-only"; }
+void writeLog(const char*) {}
+#endif
+
+template<class... A> void say(const char* fmt, A... a) {
+ char buf[320]; std::snprintf(buf, sizeof(buf), fmt, a...);
+ notify(buf);
+ writeLog(buf); writeLog("\n");
+}
+
+using LockFn = void (*)(void*);
+LockFn lockEnter = nullptr, lockLeave = nullptr;
+
+struct AudioLock {
+ char storage = 0;
+ AudioLock() { if (lockEnter && lockLeave) lockEnter(this); }
+ ~AudioLock() { if (lockEnter && lockLeave) lockLeave(this); }
+};
+
+void resolveAudioLock() {
+ const char* enter[] = {"JASCriticalSection::JASCriticalSection", "??0JASCriticalSection@@QEAA@XZ", "_ZN18JASCriticalSectionC1Ev"};
+ const char* leave[] = {"JASCriticalSection::~JASCriticalSection", "??1JASCriticalSection@@QEAA@XZ", "_ZN18JASCriticalSectionD1Ev"};
+ auto find = [](const char* const* names, LockFn& out) {
+  for (int i = 0; i < 3 && !out; ++i) {
+   void* addr = nullptr; HookSymbolFlags flags{};
+   if (svc_hook->resolve(mod_ctx, names[i], &addr, &flags) == MOD_OK && addr) out = reinterpret_cast<LockFn>(addr);
+  }
+ };
+ find(enter, lockEnter); find(leave, lockLeave);
+ if (!lockEnter || !lockLeave) { lockEnter = lockLeave = nullptr; notify("[live-state] audio lock not found; copies are not synchronised with the audio thread"); }
+}
+
+constexpr size_t kHeapObjectSize = ALIGN_NEXT(sizeof(JKRExpHeap), 0x10);
+
+bool collectHeaps(std::vector<HeapCopy>& out, const char** why) {
+ JKRExpHeap* heaps[] = {mDoExt_getGameHeap(), mDoExt_getArchiveHeap(), mDoExt_getJ2dHeap(), static_cast<JKRExpHeap*>(JKRHeap::getSystemHeap())};
+ for (auto* h : heaps) {
+  if (!h) { *why = "a required heap is missing"; return false; }
+  auto* objectStart = static_cast<uint8_t*>(h->getStartAddr()) - kHeapObjectSize;
+  if (reinterpret_cast<uint8_t*>(h) != objectStart) { *why = "unexpected heap layout"; return false; }
+  HeapCopy c; c.heap = h; c.ptr = objectStart;
+  c.size = static_cast<uint8_t*>(h->getEndAddr()) - objectStart;
+  out.push_back(std::move(c));
+ }
+ if (auto* aram = static_cast<uint8_t*>(ARGetStorageAddress())) {
+  if (ARGetSize()) {
+   HeapCopy c; c.ptr = aram; c.size = ARGetSize(); c.scan = false;
+   out.push_back(std::move(c));
+  }
+ }
+ for (size_t i = 0; i < out.size(); ++i)
+  for (size_t j = i + 1; j < out.size(); ++j)
+   if (out[i].ptr < out[j].ptr + out[j].size && out[j].ptr < out[i].ptr + out[i].size) { *why = "heap ranges overlap"; return false; }
+ return true;
+}
+
+struct ActorList { std::vector<uint8_t*> ptrs; };
+int gatherActor(void* actor, void* data) { static_cast<ActorList*>(data)->ptrs.push_back(static_cast<uint8_t*>(actor)); return 1; }
+
+bool collectActors(const std::vector<HeapCopy>& heaps, std::vector<Block>& out, const char** why) {
+ ActorList list; fopAcIt_Executor(gatherActor, &list);
+ for (auto* p : list.ptrs) {
+  bool inside = false;
+  for (auto& h : heaps) if (p >= h.ptr && p < h.ptr + h.size) inside = true;
+  if (inside) continue;
+  auto* block = JKRExpHeap::CMemBlock::getBlock(p);
+  if (!block->isValid() || block->getContent() != p || block->getSize() == 0 || block->getSize() > 0x100000) { *why = "an actor is not at the start of a heap block"; return false; }
+  Block b; b.ptr = p; b.size = block->getSize();
+  out.push_back(std::move(b));
+ }
+ std::sort(out.begin(), out.end(), [](const Block& a, const Block& b) { return a.ptr < b.ptr; });
+ return true;
+}
+
+struct LoaderPeek : JKRFileLoader {
+ static const char* name(JKRFileLoader* l) { return l->*(&LoaderPeek::mVolumeName); }
+};
+
+void collectArchiveNames(std::vector<std::string>& out) {
+ auto& list = JKRFileLoader::getVolumeList();
+ for (auto* l = list.getFirst(); l; l = l->getNext()) {
+  const char* n = LoaderPeek::name(l->getObject());
+  out.push_back(n ? n : "");
+ }
+}
+
+void collectArchives(std::vector<const void*>& out) {
+ auto& list = JKRFileLoader::getVolumeList();
+ for (auto* l = list.getFirst(); l; l = l->getNext()) out.push_back(l->getObject());
+}
+
+#ifdef _WIN32
+bool hostBlockSize(uintptr_t p, size_t& size) {
+ bool ok = false;
+ probingHostBlock = true;
+ __try {
+  HANDLE heap = GetProcessHeap();
+  if (HeapValidate(heap, 0, reinterpret_cast<void*>(p))) {
+   const SIZE_T n = HeapSize(heap, 0, reinterpret_cast<void*>(p));
+   if (n != SIZE_T(-1)) { size = n; ok = true; }
+  }
+ } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+ probingHostBlock = false;
+ return ok;
+}
+
+// Host (CRT heap) blocks that the saved memory points at. Game objects own some of these and free them
+// when destroyed, so a restore is only safe while they are still live.
+void collectHostRefs(const uint8_t* data, size_t bytes, std::unordered_set<uint64_t>& seen,
+                     const std::vector<HeapCopy>& heaps, std::vector<Snapshot::HostRef>& out, int region) {
+ MEMORY_BASIC_INFORMATION mbi{}; uint64_t lo = 1, hi = 0; bool regionOk = false;
+ const uint64_t exeLo = uint64_t(uintptr_t(exeBase())), exeHi = exeLo + exeImageSize();
+ for (size_t i = 0; i + 8 <= bytes && out.size() < 400000; i += 8) {
+  uint64_t v; std::memcpy(&v, data + i, 8);
+  if (v < 0x10000 || v > 0x00007FFFFFFFFFFFull || (v & 0xF) || (v >= exeLo && v < exeHi)) continue;
+  bool inHeap = false;
+  for (auto& h : heaps) if (v >= uint64_t(uintptr_t(h.ptr)) && v < uint64_t(uintptr_t(h.ptr)) + h.size) { inHeap = true; break; }
+  if (inHeap || !seen.insert(v).second) continue;
+  if (v < lo || v >= hi) {
+   regionOk = VirtualQuery(reinterpret_cast<void*>(v), &mbi, sizeof(mbi)) != 0;
+   if (regionOk) { lo = uint64_t(uintptr_t(mbi.BaseAddress)); hi = lo + mbi.RegionSize; }
+  }
+  if (!regionOk || mbi.State != MEM_COMMIT || mbi.Type != MEM_PRIVATE || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || v < lo + 16) continue;
+  size_t size = 0;
+  if (hostBlockSize(uintptr_t(v), size)) out.push_back({uintptr_t(v), size, region, i});
+ }
+}
+
+void reportHostRefs(const Snapshot& snap) {
+ size_t bad = 0;
+ const uint64_t exeLo = uint64_t(uintptr_t(exeBase())), exeHi = exeLo + exeImageSize();
+ for (auto& r : snap.hostRefs) {
+  size_t size = 0;
+  const bool live = hostBlockSize(r.ptr, size);
+  if (live && size == r.size) continue;
+  ++bad;
+  if (bad > 6) continue;
+  uint64_t owner = 0; size_t dist = 0;
+  if (r.region >= 0 && size_t(r.region) < snap.heaps.size()) {
+   const uint8_t* d = snap.heaps[size_t(r.region)].data.get();
+   for (size_t k = 1; k <= 256 && k * 8 <= r.offset; ++k) {
+    uint64_t v; std::memcpy(&v, d + r.offset - k * 8, 8);
+    if (v >= exeLo && v < exeHi) { owner = v - exeLo; dist = k * 8; break; }
+   }
+  }
+  say("[live-state]   host block %p: saved size %zu, now %s%zu; held in region %d +0x%zx; nearest vtable rva %llx at -0x%zx",
+      (void*)r.ptr, r.size, live ? "" : "gone/", live ? size : size_t(0), r.region, r.offset, (unsigned long long)owner, dist);
+ }
+ if (bad) say("[live-state] warning: %zu of %zu saved host blocks changed; loading anyway", bad, snap.hostRefs.size());
+}
+#else
+void collectHostRefs(const uint8_t*, size_t, std::unordered_set<uint64_t>&, const std::vector<HeapCopy>&, std::vector<Snapshot::HostRef>&, int) {}
+void reportHostRefs(const Snapshot&) {}
+#endif
+
+size_t staticsTotal() { size_t n = 0; for (auto& r : kStaticRanges) n += r.size; return n; }
+
+const char* refuse() {
+ if (!playable()) return "not in stable gameplay";
+ if (sceneLoading() || practiceLoadPending()) return "a scene load is in progress";
+ if (!daAlink_getAlinkActorClass()) return "no player";
+ if (mDoDvdThd::l_param.getFirstCommand()) return "a resource load is in flight";
+ return nullptr;
+}
+
+const char* capture(Snapshot& s) {
+ if (auto* why = checkExeIdentity()) return why;
+ const char* why = nullptr;
+ if (!collectHeaps(s.heaps, &why) || !collectActors(s.heaps, s.actors, &why)) return why;
+ for (auto& h : s.heaps) {
+  h.data.reset(new (std::nothrow) uint8_t[h.size]);
+  if (!h.data) return "out of memory";
+ }
+ for (auto& a : s.actors) {
+  a.data.reset(new (std::nothrow) uint8_t[a.size]);
+  if (!a.data) return "out of memory";
+ }
+ s.staticsSize = staticsTotal();
+ s.statics.reset(new (std::nothrow) uint8_t[s.staticsSize]);
+ if (!s.statics) return "out of memory";
+ collectArchives(s.archives);
+ collectArchiveNames(s.archiveNames);
+ s.currentHeap = JKRHeap::getCurrentHeap();
+ {
+  AudioLock audioLock;
+  uint8_t* cursor = s.statics.get();
+  for (auto& r : kStaticRanges) { std::memcpy(cursor, exeBase() + r.rva, r.size); cursor += r.size; }
+  for (auto& h : s.heaps) std::memcpy(h.data.get(), h.ptr, h.size);
+  for (auto& a : s.actors) std::memcpy(a.data.get(), a.ptr, a.size);
+ }
+ {
+  std::unordered_set<uint64_t> seen;
+  collectHostRefs(s.statics.get(), s.staticsSize, seen, s.heaps, s.hostRefs, -1);
+  for (size_t i = 0; i < s.heaps.size(); ++i) if (s.heaps[i].scan) collectHostRefs(s.heaps[i].data.get(), s.heaps[i].size, seen, s.heaps, s.hostRefs, int(i));
+ }
+ return nullptr;
+}
+
+const char* validate() {
+ if (!slot.valid) return "no state saved";
+ if (auto* why = refuse()) return why;
+ if (auto* why = checkExeIdentity()) return why;
+ std::vector<HeapCopy> heaps; const char* why = nullptr;
+ if (!collectHeaps(heaps, &why)) return why;
+ for (size_t i = 0; i < heaps.size(); ++i)
+  if (heaps[i].ptr != slot.heaps[i].ptr || heaps[i].size != slot.heaps[i].size || heaps[i].heap != slot.heaps[i].heap) return "heap layout changed";
+ reportHostRefs(slot);
+ return nullptr;
+}
+
+bool doSave() {
+ if (auto* why = refuse()) { say("[live-state] save refused: %s", why); return false; }
+ auto* link = daAlink_getAlinkActorClass();
+ const auto t0 = std::chrono::steady_clock::now();
+ if (auto* sound = Z2GetSoundMgr()) sound->stopSync();
+ Snapshot s;
+ if (auto* why = capture(s)) { say("[live-state] save refused: %s", why); return false; }
+ std::strncpy(s.stage, dComIfGp_getStartStageName(), sizeof(s.stage) - 1);
+ s.room = dComIfGp_roomControl_getStayNo();
+ s.layer = dComIfGp_getStartStageLayer();
+ s.osAtSave = OSGetTime();
+ s.player = link;
+ s.processId = fopAcM_GetID(link);
+ s.position = link->current.pos; s.speed = link->speed;
+ s.shapeAngle = link->shape_angle; s.currentAngleY = link->current.angle.y;
+ s.speedF = link->speedF;
+ if (auto* cam = dCam_getBody()) { s.camera = true; s.eye = cam->iEye(); s.center = cam->iCenter(); }
+ s.valid = true;
+ slot = std::move(s);
+ {
+  std::vector<uintptr_t> blocks;
+  for (auto& r : slot.hostRefs) blocks.push_back(r.ptr);
+  hostPinSet(blocks);
+ }
+ const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+ say("[live-state] saved stage=%s room=%d heaps=%zu actors=%zu archives=%zu statics=%zu hostBlocks=%zu held=%zu bytes in %lld us",
+     slot.stage, slot.room, slot.heaps.size(), slot.actors.size(), slot.archives.size(), slot.staticsSize, slot.hostRefs.size(), hostPinHeld(), (long long)us);
+ for (auto& h : slot.heaps) say("[live-state]   region %p size %zu", (void*)h.ptr, h.size);
+ return true;
+}
+
+bool doLoad() {
+ if (auto* why = validate()) { say("[live-state] load refused: %s", why); return false; }
+ auto* link = daAlink_getAlinkActorClass();
+ const auto t0 = std::chrono::steady_clock::now();
+ if (auto* sound = Z2GetSoundMgr()) sound->stopSync();
+ {
+  AudioLock audioLock;
+  const uint8_t* cursor = slot.statics.get();
+  for (auto& r : kStaticRanges) { std::memcpy(exeBase() + r.rva, cursor, r.size); cursor += r.size; }
+  for (auto& h : slot.heaps) std::memcpy(h.ptr, h.data.get(), h.size);
+  for (auto& a : slot.actors) std::memcpy(a.ptr, a.data.get(), a.size);
+ }
+ resetArchiveCaches();
+ hostPinAdopt();
+ JKRHeap::setCurrentHeap(const_cast<JKRHeap*>(static_cast<const JKRHeap*>(slot.currentHeap)));
+ GXInvalidateTexAll();
+ const OSTime now = OSGetTime();
+ if (dLib_time_c::m_timeStopped) dLib_time_c::m_stopTime = now;
+ else dLib_time_c::m_diffTime += now - slot.osAtSave;
+ placeNativeLink(slot.position, slot.shapeAngle.y);
+ link->shape_angle = slot.shapeAngle;
+ link->current.angle.y = slot.currentAngleY;
+ link->speed = slot.speed;
+ link->speedF = slot.speedF;
+ if (slot.camera) placeNativeCamera(slot.center, slot.eye);
+ framesSinceLoad = 0;
+ const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+ say("[live-state] loaded in %lld us", (long long)us);
+ return true;
+}
+
+HookAction onKeyEvent(ModContext*, void* args, void*, void*) {
+ const SDL_Event& event = mods::arg_ref<SDL_Event&>(args, 0);
+ if (event.type != SDL_EVENT_KEY_DOWN || event.key.repeat || !on("live_state")) return HOOK_CONTINUE;
+ if (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) return HOOK_CONTINUE;
+ bool visible = false;
+ if (svc_ui && svc_ui->is_any_document_visible) svc_ui->is_any_document_visible(mod_ctx, &visible);
+ if (visible) {
+  const auto sc = event.key.scancode;
+  if (sc == SDL_SCANCODE_1 || sc == SDL_SCANCODE_2 || sc == SDL_SCANCODE_KP_1 || sc == SDL_SCANCODE_KP_2) { writeLog("key ignored: a Dusk menu or text box is open"); writeLog("\n"); }
+  return HOOK_CONTINUE;
+ }
+ switch (event.key.scancode) {
+ case SDL_SCANCODE_2: case SDL_SCANCODE_KP_2: pending = Request::Save; break;
+ case SDL_SCANCODE_1: case SDL_SCANCODE_KP_1: pending = Request::Load; break;
+ default: break;
+ }
+ return HOOK_CONTINUE;
+}
+}
+
+void liveStateTick() {
+ if (framesSinceLoad != 0xFFFFFFFF) ++framesSinceLoad;
+ const auto request = pending; pending = Request::None;
+ if (request == Request::Save) doSave();
+ else if (request == Request::Load) doLoad();
+}
+
+void initLiveState() {
+#ifdef _WIN32
+ const char* dir = nullptr;
+ if (svc_host && svc_host->data_dir(mod_ctx, &dir) == MOD_OK && dir) {
+  const std::string path = std::string(dir) + "/live_state.log";
+  logFile = CreateFileA(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+ }
+ crashHandler = AddVectoredExceptionHandler(1, onException);
+#endif
+ resolveAudioLock();
+ toggle("live_state", "Tools", "live state (2 save / 1 load)", "Keyboard 2 saves and 1 loads a full in-memory state.", true);
+ if (guardedPre<LiveStateKeyHook>(onKeyEvent) != MOD_OK) notify("[live-state] keyboard hook unavailable");
+ if (initHostPin() != MOD_OK) notify("[live-state] texture hook unavailable; host blocks are not kept alive");
+}
+
+void shutdownLiveState() {
+#ifdef _WIN32
+ if (crashHandler) RemoveVectoredExceptionHandler(crashHandler);
+ crashHandler = nullptr;
+ if (logFile != INVALID_HANDLE_VALUE) CloseHandle(logFile);
+ logFile = INVALID_HANDLE_VALUE;
+#endif
+ hostPinRelease();
+ slot = Snapshot{};
+}
+}
