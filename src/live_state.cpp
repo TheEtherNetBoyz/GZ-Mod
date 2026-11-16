@@ -14,6 +14,7 @@
 #include "JSystem/JKernel/JKRHeap.h"
 #include "JSystem/JKernel/JKRExpHeap.h"
 #include "JSystem/JKernel/JKRFileLoader.h"
+#include "JSystem/JUtility/JUTGamePad.h"
 #include "Z2AudioLib/Z2SoundMgr.h"
 #include <dolphin/ar.h>
 #include <algorithm>
@@ -504,6 +505,7 @@ bool doLoad() {
  hostPinAdopt();
  JKRHeap::setCurrentHeap(const_cast<JKRHeap*>(static_cast<const JKRHeap*>(slot.currentHeap)));
  GXInvalidateTexAll();
+ for (int port = 0; port < 4; ++port) JUTGamePad::CRumble::stopMotorHard(port);
  mDoGph_gInf_c::offFade();
  mDoGph_gInf_c::setFadeRate(0.0f);
  if (auto* fader = mDoGph_gInf_c::getFader()) fader->setStatus(JUTFader::Wait, 0);
