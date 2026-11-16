@@ -331,6 +331,10 @@ const char* refuse() {
  if (sceneLoading() || practiceLoadPending()) return "a scene load is in progress";
  if (!daAlink_getAlinkActorClass()) return "no player";
  if (mDoDvdThd::l_param.getFirstCommand()) return "a resource load is in flight";
+
+ auto& res = g_dComIfG_gameInfo.mResControl;
+ for (auto& i : res.mObjectInfo) if (i.getDMCommand()) return "an archive is still loading";
+ for (auto& i : res.mStageInfo) if (i.getDMCommand()) return "an archive is still loading";
  return nullptr;
 }
 
