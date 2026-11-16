@@ -2,6 +2,5 @@
 /upstream/
 /test-runtime/
 *.user
-/tools/
 /docs/
 /build*/

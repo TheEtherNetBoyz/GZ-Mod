@@ -22,7 +22,11 @@ std::unordered_set<uintptr_t> protectedBlocks;
 struct Held { void* ptr; int kind; };
 std::vector<Held> held;
 
+#ifdef __APPLE__
+DEFINE_HOOK_SYMBOL("_ZN10J3DTextureD1Ev", void(J3DTexture*), TextureDtorHook);
+#else
 DEFINE_HOOK_SYMBOL("J3DTexture::~J3DTexture", void(J3DTexture*), TextureDtorHook);
+#endif
 
 void release(const Held& h) {
  switch (h.kind) {

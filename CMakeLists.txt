@@ -71,8 +71,30 @@ add_mod(dusklight_gz FEATURES game webgpu
 if(MSVC)
  target_link_options(dusklight_gz PRIVATE "/PDBALTPATH:dusklight_gz.pdb")
 endif()
-# The snapshot table and crash diagnostics use the Windows x64 executable layout.
+# Windows uses its checked-in MSVC table. An in-tree Mac build generates the
+# equivalent symbol table from the exact Mach-O linker map.
+set(GZ_LIVE_STATE_SUPPORTED OFF)
 if(WIN32 AND MSVC AND CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "x64")
+ set(GZ_LIVE_STATE_SUPPORTED ON)
+elseif(APPLE AND CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND TARGET dusklight)
+ set(GZ_LIVE_STATE_SUPPORTED ON)
+ find_package(Python3 REQUIRED COMPONENTS Interpreter)
+ set(GZ_MACOS_LINK_MAP "${CMAKE_BINARY_DIR}/dusklight-gz-macos.map")
+ set(GZ_MACOS_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+ set(GZ_MACOS_STATIC_RANGES "${GZ_MACOS_GENERATED_DIR}/static_ranges_macos.inc")
+ target_link_options(dusklight PRIVATE "LINKER:-map,${GZ_MACOS_LINK_MAP}")
+ add_custom_command(
+  OUTPUT "${GZ_MACOS_STATIC_RANGES}"
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen-static-ranges-macos.py"
+          --map "${GZ_MACOS_LINK_MAP}" --out "${GZ_MACOS_STATIC_RANGES}"
+  DEPENDS dusklight "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen-static-ranges-macos.py"
+  COMMENT "Generating macOS GZ live-state ranges"
+  VERBATIM)
+ add_custom_target(dusklight_gz_macos_ranges DEPENDS "${GZ_MACOS_STATIC_RANGES}")
+ add_dependencies(dusklight_gz dusklight_gz_macos_ranges)
+ target_include_directories(dusklight_gz PRIVATE "${GZ_MACOS_GENERATED_DIR}")
+endif()
+if(GZ_LIVE_STATE_SUPPORTED)
  target_sources(dusklight_gz PRIVATE src/live_state.cpp src/host_pin.cpp)
  target_compile_definitions(dusklight_gz PRIVATE GZ_LIVE_STATE)
 endif()

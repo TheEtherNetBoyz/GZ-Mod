@@ -32,6 +32,10 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#include <malloc/malloc.h>
 #endif
 namespace gz {
 bool gzMenuOpen();
@@ -46,7 +50,11 @@ namespace {
 enum class Request { None, Save, Load };
 
 struct StaticRange { const char* anchor; int32_t offset; uint32_t size; const char* check; int32_t checkDelta; };
+#ifdef __APPLE__
+#include "static_ranges_macos.inc"
+#else
 #include "static_ranges.inc"
+#endif
 
 struct Block {
  uint8_t* ptr = nullptr; size_t size = 0;
@@ -138,8 +146,36 @@ LONG CALLBACK onException(PEXCEPTION_POINTERS info) {
  }
  return EXCEPTION_CONTINUE_SEARCH;
 }
+#elif defined(__APPLE__)
+std::FILE* logFile = nullptr;
+uint8_t* exeBase() {
+ return reinterpret_cast<uint8_t*>(const_cast<mach_header*>(_dyld_get_image_header(0)));
+}
+size_t exeImageSize() {
+ const auto* header = reinterpret_cast<const mach_header_64*>(exeBase());
+ if (!header || header->magic != MH_MAGIC_64) return 0;
+ const auto slide = _dyld_get_image_vmaddr_slide(0);
+ const auto* command = reinterpret_cast<const load_command*>(reinterpret_cast<const uint8_t*>(header) + sizeof(*header));
+ uintptr_t end = reinterpret_cast<uintptr_t>(header);
+ for (uint32_t i = 0; i < header->ncmds; ++i) {
+  if (command->cmdsize < sizeof(load_command)) return 0;
+  if (command->cmd == LC_SEGMENT_64) {
+   const auto* segment = reinterpret_cast<const segment_command_64*>(command);
+   if (std::strncmp(segment->segname, "__PAGEZERO", sizeof(segment->segname)) != 0)
+    end = std::max(end, static_cast<uintptr_t>(segment->vmaddr + segment->vmsize + slide));
+  }
+  command = reinterpret_cast<const load_command*>(reinterpret_cast<const uint8_t*>(command) + command->cmdsize);
+ }
+ return end - reinterpret_cast<uintptr_t>(header);
+}
+void writeLog(const char* text) {
+ if (!logFile) return;
+ std::fputs(text, logFile);
+ std::fflush(logFile);
+}
 #else
 uint8_t* exeBase() { return nullptr; }
+size_t exeImageSize() { return 0; }
 void writeLog(const char*) {}
 #endif
 
@@ -160,9 +196,9 @@ using LockFn = void (*)(void*);
 LockFn lockEnter = nullptr, lockLeave = nullptr;
 
 struct AudioLock {
- char storage = 0;
- AudioLock() { if (lockEnter && lockLeave) lockEnter(this); }
- ~AudioLock() { if (lockEnter && lockLeave) lockLeave(this); }
+ alignas(16) unsigned char storage[128] = {};
+ AudioLock() { if (lockEnter && lockLeave) lockEnter(storage); }
+ ~AudioLock() { if (lockEnter && lockLeave) lockLeave(storage); }
 };
 
 void resolveAudioLock() {
@@ -186,13 +222,18 @@ const char* staticsFailure = nullptr;
 
 // Looks each range up by symbol name on the running build and checks the distance between its two anchors.
 const char* resolveStatics() {
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
  if (staticsResolved) return staticsFailure;
  staticsResolved = true;
  const uint8_t* lo = exeBase();
  const uint8_t* hi = lo + exeImageSize();
  size_t total = 0, skipped = 0, mismatched = 0;
- for (auto& r : kStaticRanges) {
+#ifdef __APPLE__
+ const auto& ranges = kMacStaticRanges;
+#else
+ const auto& ranges = kStaticRanges;
+#endif
+ for (auto& r : ranges) {
   total += r.size;
   void* a = nullptr; HookSymbolFlags flags{};
   if (svc_hook->resolve(mod_ctx, r.anchor, &a, &flags) != MOD_OK || !a) { skipped += r.size; continue; }
@@ -206,7 +247,7 @@ const char* resolveStatics() {
   resolvedStatics.push_back({start, r.size});
  }
  say("[live-state] statics: %zu of %zu ranges resolved, %zu bytes skipped (%zu with a changed layout)",
-     resolvedStatics.size(), sizeof(kStaticRanges) / sizeof(kStaticRanges[0]), skipped, mismatched);
+     resolvedStatics.size(), sizeof(ranges) / sizeof(ranges[0]), skipped, mismatched);
  if (skipped * 10 > total) staticsFailure = "too many game statics could not be found on this Dusklight build";
  return staticsFailure;
 #else
@@ -330,6 +371,39 @@ void reportHostRefs(const Snapshot& snap) {
  }
  if (bad) say("[live-state] warning: %zu of %zu saved host blocks changed; loading anyway", bad, snap.hostRefs.size());
 }
+#elif defined(__APPLE__)
+bool hostBlockSize(uintptr_t p, size_t& size) {
+ size = malloc_size(reinterpret_cast<void*>(p));
+ return size != 0;
+}
+
+void collectHostRefs(const uint8_t* data, size_t bytes, std::unordered_set<uint64_t>& seen,
+                     const std::vector<HeapCopy>& heaps, std::vector<Snapshot::HostRef>& out, int region) {
+ const uint64_t exeLo = uint64_t(uintptr_t(exeBase())), exeHi = exeLo + exeImageSize();
+ for (size_t i = 0; i + 8 <= bytes && out.size() < 400000; i += 8) {
+  uint64_t v; std::memcpy(&v, data + i, 8);
+  if (v < 0x10000 || v > 0x00007FFFFFFFFFFFull || (v & 0xF) || (v >= exeLo && v < exeHi)) continue;
+  bool inHeap = false;
+  for (auto& h : heaps)
+   if (v >= uint64_t(uintptr_t(h.ptr)) && v < uint64_t(uintptr_t(h.ptr)) + h.size) { inHeap = true; break; }
+  if (inHeap || !seen.insert(v).second) continue;
+  size_t size = 0;
+  if (hostBlockSize(uintptr_t(v), size)) out.push_back({uintptr_t(v), size, region, i, 0, 0});
+ }
+}
+
+void reportHostRefs(const Snapshot& snap) {
+ size_t bad = 0;
+ for (auto& r : snap.hostRefs) {
+  size_t size = 0;
+  if (hostBlockSize(r.ptr, size) && size == r.size) continue;
+  ++bad;
+  if (bad <= 6)
+   say("[live-state]   host block %p: saved size %zu, now %s%zu; held in region %d +0x%zx",
+       reinterpret_cast<void*>(r.ptr), r.size, size ? "" : "gone/", size, r.region, r.offset);
+ }
+ if (bad) say("[live-state] warning: %zu of %zu saved host blocks changed; loading anyway", bad, snap.hostRefs.size());
+}
 #else
 void collectHostRefs(const uint8_t*, size_t, std::unordered_set<uint64_t>&, const std::vector<HeapCopy>&, std::vector<Snapshot::HostRef>&, int) {}
 void reportHostRefs(const Snapshot&) {}
@@ -347,6 +421,9 @@ const char* refuse() {
  auto& res = g_dComIfG_gameInfo.mResControl;
  for (auto& i : res.mObjectInfo) if (i.getDMCommand()) return "loading";
  for (auto& i : res.mStageInfo) if (i.getDMCommand()) return "loading";
+#ifdef __APPLE__
+ if (!lockEnter || !lockLeave) return "audio synchronization unavailable";
+#endif
  return nullptr;
 }
 
@@ -557,6 +634,12 @@ void initLiveState() {
   logFile = CreateFileA(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
  }
  crashHandler = AddVectoredExceptionHandler(1, onException);
+#elif defined(__APPLE__)
+ const char* dir = nullptr;
+ if (svc_host && svc_host->data_dir(mod_ctx, &dir) == MOD_OK && dir) {
+  const std::string path = std::string(dir) + "/live_state.log";
+  logFile = std::fopen(path.c_str(), "a");
+ }
 #endif
  resolveAudioLock();
  toggle("live_state", "Tools", "Save States", "L + R + Right to save, R + Right to load.", true);
@@ -569,6 +652,9 @@ void shutdownLiveState() {
  crashHandler = nullptr;
  if (logFile != INVALID_HANDLE_VALUE) CloseHandle(logFile);
  logFile = INVALID_HANDLE_VALUE;
+#elif defined(__APPLE__)
+ if (logFile) std::fclose(logFile);
+ logFile = nullptr;
 #endif
  hostPinRelease();
  slot = Snapshot{};
