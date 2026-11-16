@@ -74,7 +74,7 @@ static std::vector<Row> rows(){
  }else if(name=="tools"){
   sub("checkers","Checkers");sub("controller","controller");sub("link","link");sub("scene","tools scene");sub("timers","timers");sub("rng","RNG");
 #ifdef GZ_LIVE_STATE
-  control("live_state");
+  control("live_state","save states");
 #endif
   return out;
  }else if(name=="RNG"){

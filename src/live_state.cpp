@@ -17,7 +17,10 @@
 #include "Z2AudioLib/Z2SoundMgr.h"
 #include <dolphin/ar.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include "gz_font.hpp"
+#include "presentation.hpp"
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -31,6 +34,7 @@
 #include <Windows.h>
 #endif
 namespace gz {
+bool gzMenuOpen();
 bool practiceLoadPending();
 ModResult initHostPin();
 void hostPinSet(const std::vector<uintptr_t>& blocks);
@@ -138,6 +142,13 @@ LONG CALLBACK onException(PEXCEPTION_POINTERS info) {
 uint8_t* exeBase() { return nullptr; }
 void writeLog(const char*) {}
 #endif
+
+struct Notice { std::string text; int ttl = 0; uint32_t rgba = 0; };
+std::array<Notice, 8> notices;
+void showNotice(const std::string& text, bool refused = false) {
+ for (size_t i = notices.size() - 1; i > 0; --i) notices[i] = notices[i - 1];
+ notices[0] = {text, 120, refused ? 0xff606000u : 0xffffff00u};
+}
 
 template<class... A> void say(const char* fmt, A... a) {
  char buf[320]; std::snprintf(buf, sizeof(buf), fmt, a...);
@@ -327,14 +338,14 @@ void reportHostRefs(const Snapshot&) {}
 size_t staticsTotal() { size_t n = 0; for (auto& r : resolvedStatics) n += r.size; return n; }
 
 const char* refuse() {
- if (!playable()) return "not in stable gameplay";
- if (sceneLoading() || practiceLoadPending()) return "a scene load is in progress";
+ if (!playable()) return "not in gameplay";
+ if (sceneLoading() || practiceLoadPending()) return "loading";
  if (!daAlink_getAlinkActorClass()) return "no player";
- if (mDoDvdThd::l_param.getFirstCommand()) return "a resource load is in flight";
+ if (mDoDvdThd::l_param.getFirstCommand()) return "loading";
 
  auto& res = g_dComIfG_gameInfo.mResControl;
- for (auto& i : res.mObjectInfo) if (i.getDMCommand()) return "an archive is still loading";
- for (auto& i : res.mStageInfo) if (i.getDMCommand()) return "an archive is still loading";
+ for (auto& i : res.mObjectInfo) if (i.getDMCommand()) return "loading";
+ for (auto& i : res.mStageInfo) if (i.getDMCommand()) return "loading";
  return nullptr;
 }
 
@@ -424,7 +435,7 @@ const char* capture(Snapshot& s) {
  }
  for (auto& h : s.heaps) {
   if (!pack(h)) return "out of memory";
-  if (!verifyPacked(h)) return "the packed copy did not match the original";
+  if (!verifyPacked(h)) return "copy mismatch";
   h.data.reset();
  }
  return nullptr;
@@ -437,18 +448,18 @@ const char* validate() {
  std::vector<HeapCopy> heaps; const char* why = nullptr;
  if (!collectHeaps(heaps, &why)) return why;
  for (size_t i = 0; i < heaps.size(); ++i)
-  if (heaps[i].ptr != slot.heaps[i].ptr || heaps[i].size != slot.heaps[i].size || heaps[i].heap != slot.heaps[i].heap) return "heap layout changed";
+  if (heaps[i].ptr != slot.heaps[i].ptr || heaps[i].size != slot.heaps[i].size || heaps[i].heap != slot.heaps[i].heap) return "memory layout changed";
  reportHostRefs(slot);
  return nullptr;
 }
 
 bool doSave() {
- if (auto* why = refuse()) { say("[live-state] save refused: %s", why); return false; }
+ if (auto* why = refuse()) { say("[live-state] save refused: %s", why); showNotice(std::string("State refused: ") + why, true); return false; }
  auto* link = daAlink_getAlinkActorClass();
  const auto t0 = std::chrono::steady_clock::now();
  if (auto* sound = Z2GetSoundMgr()) sound->stopSync();
  Snapshot s;
- if (auto* why = capture(s)) { say("[live-state] save refused: %s", why); return false; }
+ if (auto* why = capture(s)) { say("[live-state] save refused: %s", why); showNotice(std::string("State refused: ") + why, true); return false; }
  std::strncpy(s.stage, dComIfGp_getStartStageName(), sizeof(s.stage) - 1);
  s.room = dComIfGp_roomControl_getStayNo();
  s.layer = dComIfGp_getStartStageLayer();
@@ -472,11 +483,12 @@ bool doSave() {
  size_t total = 0, stored = 0;
  for (auto& h : slot.heaps) { total += h.size; stored += h.packedSize; }
  say("[live-state]   kept %zu of %zu MiB (empty pages skipped)", stored >> 20, total >> 20);
+ showNotice("State saved");
  return true;
 }
 
 bool doLoad() {
- if (auto* why = validate()) { say("[live-state] load refused: %s", why); return false; }
+ if (auto* why = validate()) { say("[live-state] load refused: %s", why); showNotice(std::string("State refused: ") + why, true); return false; }
  auto* link = daAlink_getAlinkActorClass();
  const auto t0 = std::chrono::steady_clock::now();
  if (auto* sound = Z2GetSoundMgr()) sound->stopSync();
@@ -506,16 +518,31 @@ bool doLoad() {
  framesSinceLoad = 0;
  const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
  say("[live-state] loaded in %lld us", (long long)us);
+ showNotice("State loaded");
  return true;
 }
 
 }
 
+bool liveStateNoticeVisible() { for (auto& n : notices) if (n.ttl) return true; return false; }
+void drawLiveStateNotices() {
+ if (gzMenuOpen()) return;
+ const auto p = spritePosition(Fifo);
+ for (size_t i = 0; i < notices.size(); ++i) {
+  const auto& n = notices[i];
+  if (!n.ttl) continue;
+  const uint32_t alpha = n.ttl < 30 ? uint32_t(n.ttl * 8.5f) : 255;
+  const float y = p.y - float(i) * 14;
+  if (on("drop_shadows")) drawGzTextPlain(n.text, p.x + 1, y + 1, alpha, 17);
+  drawGzTextPlain(n.text, p.x, y, n.rgba | alpha, 17);
+ }
+}
 void liveStateSave() { pending = Request::Save; }
 void liveStateLoad() { pending = Request::Load; }
 
 void liveStateTick() {
  if (framesSinceLoad != 0xFFFFFFFF) ++framesSinceLoad;
+ if (!gzMenuOpen()) for (auto& n : notices) if (n.ttl > 0) --n.ttl;
  const auto request = pending; pending = Request::None;
  if (request == Request::Save) doSave();
  else if (request == Request::Load) doLoad();

@@ -16,12 +16,14 @@ IMPORT_SERVICE(HostService,svc_host);
 IMPORT_SERVICE(CameraService,svc_camera);
 IMPORT_SERVICE(ResourceService,svc_resource);
 IMPORT_SERVICE(GfxService,svc_gfx);
-namespace gz {void initLiveState();void liveStateTick();void shutdownLiveState();ModResult initInterpolation();ModResult initProjection();ModResult initTunic();ModResult initFastMovement();ModResult initFlagLog();ModResult initTriggers();ModResult initCollision();ModResult initActorTools();ModResult installScene();ModResult initCheckers();void initOverlays();ModResult installTimerHooks();void overlayTick();ModResult initGzMenu();void shutdownGzMenu();ModResult installPractice();void shutdownInput();void initItemWheel();void initCollectibles();void initWarping();ModResult initReload();ModResult initRng();ModResult initCamera();void cameraTick();void shutdownCamera();void reloadTick();}
+namespace gz {bool liveStateNoticeVisible();void drawLiveStateNotices();void initLiveState();void liveStateTick();void shutdownLiveState();ModResult initInterpolation();ModResult initProjection();ModResult initTunic();ModResult initFastMovement();ModResult initFlagLog();ModResult initTriggers();ModResult initCollision();ModResult initActorTools();ModResult installScene();ModResult initCheckers();void initOverlays();ModResult installTimerHooks();void overlayTick();ModResult initGzMenu();void shutdownGzMenu();ModResult installPractice();void shutdownInput();void initItemWheel();void initCollectibles();void initWarping();ModResult initReload();ModResult initRng();ModResult initCamera();void cameraTick();void shutdownCamera();void reloadTick();}
 namespace gz {
 #ifndef GZ_LIVE_STATE
 void initLiveState() {}
 void liveStateTick() {}
 void shutdownLiveState() {}
+bool liveStateNoticeVisible() { return false; }
+void drawLiveStateNotices() {}
 #endif
 void initializeNativeOxygen();void resetRngForSpeedrun();void cancelPracticeForSpeedrun();void resetReloadForSpeedrun();void resetTimer();
 void suspendGz(){

@@ -16,7 +16,7 @@
 #include "SSystem/SComponent/c_counter.h"
 #include <chrono>
 #include <cstdio>
-namespace gz {int framePauseVisual();void sampleTransformIndicator();void drawTransformIndicator();bool checkerOverlaysVisible();void drawCheckers();void drawDisplacement();void drawLinkDebug();void drawStageInfo();void sampleInputViewer();void drawInputViewer(float,float);
+namespace gz {bool liveStateNoticeVisible();void drawLiveStateNotices();int framePauseVisual();void sampleTransformIndicator();void drawTransformIndicator();bool checkerOverlaysVisible();void drawCheckers();void drawDisplacement();void drawLinkDebug();void drawStageInfo();void sampleInputViewer();void drawInputViewer(float,float);
 static PracticeTimers timers;
 static bool timerLoading=false;
 static OSTime previousGameTime=0;
@@ -69,7 +69,7 @@ void initOverlays(){
  action("toggle_timer","Tools","Start / stop timer",toggleTimer);
  action("reset_timer","Tools","Reset timer",resetTimer);
 }
-bool overlaysVisible(){return (on("frame_advance")&&framePauseVisual())||on("heap_debug")||on("transform_indicator")||checkerOverlaysVisible()||on("timer")||on("igt_timer")||on("load_timer")||on("input_viewer")||on("link_debug")||on("stage_info")||on("displacement");}
+bool overlaysVisible(){return (on("frame_advance")&&framePauseVisual())||on("heap_debug")||on("transform_indicator")||checkerOverlaysVisible()||on("timer")||on("igt_timer")||on("load_timer")||on("input_viewer")||on("link_debug")||on("stage_info")||on("displacement")||liveStateNoticeVisible();}
 void drawOverlays(){
  drawCheckers();drawTransformIndicator();
  if(on("frame_advance"))if(const int mode=framePauseVisual()){
@@ -100,5 +100,6 @@ void drawOverlays(){
  if(on("link_debug"))drawLinkDebug();
  if(on("stage_info"))drawStageInfo();
  if(on("input_viewer")){const auto p=spritePosition(InputViewer);drawInputViewer(p.x,p.y);}
+ drawLiveStateNotices();
 }
 }
