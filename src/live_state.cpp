@@ -96,6 +96,24 @@ LONG CALLBACK onException(PEXCEPTION_POINTERS info) {
   (unsigned long long)info->ContextRecord->Rip, (unsigned long long)(info->ContextRecord->Rip - base),
   (unsigned long long)info->ExceptionRecord->ExceptionInformation[1], framesSinceLoad);
  writeLog(line);
+ {
+  const CONTEXT& c = *info->ContextRecord;
+  const unsigned long long regs[] = {c.Rax, c.Rcx, c.Rdx, c.Rbx, c.Rsi, c.Rdi, c.R8, c.R9, c.R10, c.R11, c.R12, c.R13, c.R14, c.R15};
+  const char* names[] = {"rax", "rcx", "rdx", "rbx", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
+  for (int i = 0; i < 14; ++i) {
+   std::snprintf(line, sizeof(line), "  %s=%llx", names[i], regs[i]);
+   writeLog(line);
+  }
+  writeLog("\n");
+  for (int i = 0; i < 14; ++i) {
+   const auto* p = reinterpret_cast<const unsigned char*>(regs[i]);
+   if (regs[i] < 0x10000 || IsBadReadPtr(p, 64)) continue;
+   std::snprintf(line, sizeof(line), "  [%s]", names[i]);
+   writeLog(line);
+   for (int k = 0; k < 64; ++k) { std::snprintf(line, sizeof(line), "%s%02x", k % 8 ? "" : " ", p[k]); writeLog(line); }
+   writeLog("\n");
+  }
+ }
  const auto* sp = reinterpret_cast<const uintptr_t*>(info->ContextRecord->Rsp);
  const size_t imageSize = exeImageSize();
  int found = 0;
