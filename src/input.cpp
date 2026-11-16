@@ -15,7 +15,7 @@ namespace Rml {class Event;}
 #include <vector>
 #include <optional>
 
-namespace gz {bool comboCaptureActive();void loadGorgePractice();bool gorgePracticeEnabled();void checkerTick();void reloadArea();void reloadPractice();void toggleTimer();void resetTimer();bool gzMenuOpen();void gzMenuInput(uint16_t);
+namespace gz {void liveStateSave();void liveStateLoad();bool comboCaptureActive();void loadGorgePractice();bool gorgePracticeEnabled();void checkerTick();void reloadArea();void reloadPractice();void toggleTimer();void resetTimer();bool gzMenuOpen();void gzMenuInput(uint16_t);
 DEFINE_HOOK(&dScnPly_c::calcPauseTimer, PauseTimer);
 DEFINE_HOOK(&mDoCPd_c::read, PadRead);
 DEFINE_HOOK_SYMBOL("dusk::ui::map_nav_event",dusk::ui::NavCommand(const Rml::Event*),ReloadMenuGuard);
@@ -114,6 +114,8 @@ ModResult initInput() {
   {"combo_menu","Open menu",0x64,0,[]{openMenu();}},
   {"combo_store","Store position",0x28,0,storePosition,false,"teleport"},
   {"combo_load","Restore position",0x24,0,loadPosition,false,"teleport"},
+  {"combo_state_save","Save live state",0x62,0,liveStateSave,false,"live_state"},
+  {"combo_state_load","Load live state",0x22,0,liveStateLoad,false,"live_state"},
   {"combo_moon","Moon jump",0x120,0,[]{if(playable())daPy_getPlayerActorClass()->speed.y=56;},true,"moon_jump"},
   {"combo_gorge","Gorge void practice",0x50,0,loadGorgePractice,false,"gorge_void"},
   {"combo_reload","Reload area / practice",0x1160,0,reloadCommand,false,"area_reload"},

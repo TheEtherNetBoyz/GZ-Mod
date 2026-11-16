@@ -22,6 +22,8 @@ namespace gz {
 void initLiveState() {}
 void liveStateTick() {}
 void shutdownLiveState() {}
+void liveStateSave() {}
+void liveStateLoad() {}
 #endif
 void initializeNativeOxygen();void resetRngForSpeedrun();void cancelPracticeForSpeedrun();void resetReloadForSpeedrun();void resetTimer();
 void suspendGz(){

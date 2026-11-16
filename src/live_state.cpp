@@ -1,4 +1,4 @@
-// Experimental live state: keys 2 = save, 1 = load. A refused load writes nothing.
+// Experimental live state. A refused load writes nothing.
 #include "core.hpp"
 #include "loading.hpp"
 #include "native_pose.hpp"
@@ -29,9 +29,6 @@
 #define NOMINMAX
 #include <Windows.h>
 #endif
-#include <SDL3/SDL_events.h>
-#include <SDL3/SDL_keycode.h>
-DEFINE_HOOK_SYMBOL("dusk::ui::handle_event", void(SDL_Event&), LiveStateKeyHook);
 namespace gz {
 bool practiceLoadPending();
 ModResult initHostPin();
@@ -422,25 +419,10 @@ bool doLoad() {
  return true;
 }
 
-HookAction onKeyEvent(ModContext*, void* args, void*, void*) {
- const SDL_Event& event = mods::arg_ref<SDL_Event&>(args, 0);
- if (event.type != SDL_EVENT_KEY_DOWN || event.key.repeat || !on("live_state")) return HOOK_CONTINUE;
- if (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) return HOOK_CONTINUE;
- bool visible = false;
- if (svc_ui && svc_ui->is_any_document_visible) svc_ui->is_any_document_visible(mod_ctx, &visible);
- if (visible) {
-  const auto sc = event.key.scancode;
-  if (sc == SDL_SCANCODE_1 || sc == SDL_SCANCODE_2 || sc == SDL_SCANCODE_KP_1 || sc == SDL_SCANCODE_KP_2) { writeLog("key ignored: a Dusk menu or text box is open"); writeLog("\n"); }
-  return HOOK_CONTINUE;
- }
- switch (event.key.scancode) {
- case SDL_SCANCODE_2: case SDL_SCANCODE_KP_2: pending = Request::Save; break;
- case SDL_SCANCODE_1: case SDL_SCANCODE_KP_1: pending = Request::Load; break;
- default: break;
- }
- return HOOK_CONTINUE;
 }
-}
+
+void liveStateSave() { pending = Request::Save; }
+void liveStateLoad() { pending = Request::Load; }
 
 void liveStateTick() {
  if (framesSinceLoad != 0xFFFFFFFF) ++framesSinceLoad;
@@ -459,8 +441,7 @@ void initLiveState() {
  crashHandler = AddVectoredExceptionHandler(1, onException);
 #endif
  resolveAudioLock();
- toggle("live_state", "Tools", "live state (2 save / 1 load)", "Keyboard 2 saves and 1 loads a full in-memory state.", true);
- if (guardedPre<LiveStateKeyHook>(onKeyEvent) != MOD_OK) notify("[live-state] keyboard hook unavailable");
+ toggle("live_state", "Tools", "live state hotkeys", "L + R + Right saves and R + Right loads a full in-memory state.", true);
  if (initHostPin() != MOD_OK) notify("[live-state] texture hook unavailable; host blocks are not kept alive");
 }
 
